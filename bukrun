@@ -1,0 +1,244 @@
+#!/bin/bash
+
+######################################################################
+
+CONTAINER_PROJECT="${CONTAINER_PROJECT:-environment2}"
+CONTAINER_NAME="${CONTAINER_NAME:-symfony}"
+
+######################################################################
+
+GREEN='\033[0;32m'
+LIGHT_BLUE='\033[1;34m'
+LIGHT_GREEN='\033[1;32m'
+LIGHT_MAGENTA='\033[0;95m'
+LIGHT_RED='\033[1;31m'
+RESET=$(tput sgr0)
+
+######################################################################
+
+check_executable() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo -e "\n${LIGHT_RED}✗ The required executable '$1' is not present to run the command.${RESET}" >&2
+        exit 2
+    fi
+}
+
+trim() {
+    echo "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+######################################################################
+
+command_ecs() {
+    echo -e "\n${LIGHT_BLUE}Running PHP Easy Coding Standard${RESET}"
+
+    EXECUTABLE='vendor/bin/ecs'
+    check_executable $EXECUTABLE
+
+    declare -n commands=$1
+    command_line_parameters=$2
+
+    commands[0,0]=""
+    commands[0,1]="$EXECUTABLE check --clear-cache --config=ecs.php $command_line_parameters"
+}
+
+command_md() {
+    echo -e "\n${LIGHT_BLUE}Running PHP Mess Detector${RESET}"
+
+    EXECUTABLE='vendor/bin/phpmd'
+    check_executable $EXECUTABLE
+
+    declare -n commands=$1
+    command_line_parameters=$2
+
+    commands[0,0]=""
+    commands[0,1]="$EXECUTABLE $command_line_parameters text phpmd_ruleset.xml --exclude 'src/Migrations/*,src/DataFixtures/*' -vvv"
+}
+            
+command_stan() {
+    echo -e "\n${LIGHT_BLUE}Running PHP Static Analysis Tool${RESET}"
+
+    EXECUTABLE='vendor/bin/phpstan'
+    check_executable $EXECUTABLE
+
+    declare -n commands=$1
+    command_line_parameters=$2
+
+#    commands[0,0]="${LIGHT_MAGENTA}- Warming up cache ...${RESET}"
+#    commands[0,1]="bin/console cache:warmup"
+#    commands[1,0]="${LIGHT_MAGENTA}- Clear previous cached results ...${RESET}"
+#    commands[1,1]="vendor/bin/phpstan clear-result-cache"
+    commands[2,0]="${LIGHT_MAGENTA}- Analyzing with PHPSTAN ...${RESET}"
+    commands[2,1]="XDEBUG_MODE=off $EXECUTABLE analyze $command_line_parameters --level 9 -c phpstan.neon.dist --debug -vv"
+}
+
+command_linters() {
+    echo -e "\n${LIGHT_BLUE}Running full Buk package of Linters${RESET}"
+
+    EXECUTABLE='linters.sh'
+    check_executable $EXECUTABLE
+
+    declare -n commands=$1
+    command_line_parameters=$2
+
+    commands[0,0]=""
+    commands[0,1]="XDEBUG_MODE=off ./$EXECUTABLE"
+}
+
+command_test() {
+    echo -e "\n${LIGHT_BLUE}Running PHPUnit${RESET}"
+
+    EXECUTABLE='bin/phpunit'
+    check_executable $EXECUTABLE
+
+    declare -n commands=$1
+    command_line_parameters=$2
+
+    commands[0,0]=""
+    commands[0,1]="$EXECUTABLE $command_line_parameters --testdox --colors=always --no-coverage --no-logging"
+}
+
+command_coverage() {
+    echo -e "\n${LIGHT_BLUE}Running PHPUnit - COVERAGE${RESET}"
+
+    EXECUTABLE='bin/phpunit'
+    check_executable $EXECUTABLE
+
+    declare -n commands=$1
+    readarray -t command_line_parameters < <(bash -c "printf '%s\n' $2")
+
+    tests_to_run="${command_line_parameters[0]}"
+    results_to_filter="${command_line_parameters[1]}"
+
+    TEMP_FILE=$(mktemp)
+    trap 'rm -f "$TEMP_FILE"' EXIT 
+
+    PHPUNIT_OPTIONS="--coverage-text --colors=never --no-logging --no-interaction --disallow-test-output --disallow-resource-usage"
+
+    commands[0,0]="Running tool and getting the coverage data ..."
+    commands[0,1]="XDEBUG_MODE=coverage $EXECUTABLE $PHPUNIT_OPTIONS $tests_to_run > \"$TEMP_FILE\"" 
+    commands[1,0]="Filtering the coverage data for ${results_to_filter} ..."
+    commands[1,1]="grep -A1 \"$results_to_filter\" \"${TEMP_FILE}\""
+}
+
+command_teststop() {
+    echo -e "\n${LIGHT_BLUE}Running PHPUnit (stop on error/failure)${RESET}"
+
+    EXECUTABLE='bin/phpunit'
+    check_executable $EXECUTABLE
+
+    declare -n commands=$1
+    command_line_parameters=$2
+
+    commands[0,0]=""
+    commands[0,1]="$EXECUTABLE $command_line_parameters --testdox --colors=always --no-coverage --no-logging --stop-on-failure --verbose"
+}
+
+######################################################################
+
+show_help() {
+    echo "Ayuda"
+
+#            echo -e "\n${LIGHT_RED}*** Unknown command: $COMMAND ***${RESET}"
+#            echo 
+#            echo -e "Use: bukcom <command> [...]"
+#            echo 
+#            echo -e "Use one of the following commands:"
+#            echo 
+#            echo -e "  ecs TARGET  - PHP Easy Coding Standard"
+#            echo -e "  md TARGET   - PHP Mess Detector"
+#            echo -e "  stan TARGET - PHP Static Analysis Tool"
+#            echo -e "  test TARGET - PHPUnit"
+#            echo 
+}
+
+######################################################################
+
+process_command() {
+    command_matrix=$1
+    command=$2
+    command_line_parameters=$3
+
+    "$command" command_matrix "$command_line_parameters"
+}
+
+prepare_docker_command() {
+    command_line=$1
+    
+    echo "docker compose -p ${CONTAINER_PROJECT} exec ${CONTAINER_NAME} bash -c '${command_line}'"
+}
+
+run_command() {
+    command="command_$1"
+    docker=$2
+    command_line_parameters=${@:3}
+
+    if ! declare -F "$command" > /dev/null; then
+        show_help
+        exit 1
+    fi
+    
+    declare -A command_matrix
+
+    process_command command_matrix "$command" "$command_line_parameters" 
+
+    ######################################################################
+
+    declare -A rows_found
+    for key in "${!command_matrix[@]}"; do
+        row="${key%%,*}"
+        rows_found["$row"]=1
+    done
+
+    for row in $(printf '%s\n' "${!rows_found[@]}" | sort -n); do
+        ### Recorrer columnas existentes en esta fila, ordenadas
+        ##for col in $(printf '%s\n' "${!command_matrix[@]}" | awk -F, -v r="$row" '$1 == r { print $2 }' | sort); do
+        ##   echo "  $col: ${command_matrix[$row,$col]}"
+        ##done
+        
+        col=0
+        if [[ -v command_matrix[$row,$col] ]]; then
+            message=$(trim "${command_matrix[$row,$col]}")
+            
+            if [[ -n "$message" ]]; then
+                echo -e "${message}"
+            fi
+        fi
+
+        col=1
+        if [[ -v command_matrix[$row,$col] ]]; then
+            command_line=$(trim "${command_matrix[$row,$col]}")
+
+            if [[ "$docker" -eq 0 ]]; then
+                # Print a dockerized message
+                command_line=$(prepare_docker_command "${command_line}")
+            fi
+
+            if [[ -n "$command_line" ]]; then
+                echo -e "${command_line}"
+                bash -c "${command_line}"
+            fi
+        fi
+    done
+}
+
+######################################################################
+
+DOCKER=1    # False
+
+COMMAND="$1"
+shift # Remove the parameter
+
+if [[ "$COMMAND" == "docker" || "$COMMAND" == "--docker" || "$COMMAND" == "-d" ]]; then
+    DOCKER=0    # True
+    COMMAND="$1"
+    shift
+fi
+
+COMMAND_LINE_PARAMETERS=$@
+
+run_command "$COMMAND" "$DOCKER" $COMMAND_LINE_PARAMETERS
+
+######################################################################
+
+exit 0
